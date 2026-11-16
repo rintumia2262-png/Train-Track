@@ -1,0 +1,6 @@
+{
+  "name": "Skyblade 3D",
+  "description": "High-speed 3D aerial canyon combat and flight simulator built with Three.js PBR rendering, procedural terrain, and Web Audio synthesis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
