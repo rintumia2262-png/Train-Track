@@ -16,7 +16,10 @@ import {
   buildTrackPolyline,
   computeTrainTelemetry,
   samplePointAlongRoute,
+  samplePointAlongTrackExact,
 } from '../utils/trackMath';
+
+const DEFAULT_TRAIN_ZOOM = 16.5;
 
 interface TrainMap3DProps {
   train: TrainDefinition;
@@ -45,49 +48,54 @@ function createBangladeshLocomotive(): THREE.Group {
     emissiveIntensity: 1.8,
   });
 
-  // 1. Heavy Bogie Chassis
-  const chassis = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.9, 18.2), chassisMat);
-  chassis.position.set(0, 0.55, 0);
+  // 1. Heavy Bogie Chassis (clear of ground z=0 to avoid depth fighting)
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(3.1, 0.84, 18.0), chassisMat);
+  chassis.position.set(0, 0.54, 0);
   loco.add(chassis);
 
   // 2. Crimson Lower Skirt Band
-  const redBand = new THREE.Mesh(new THREE.BoxGeometry(3.25, 0.85, 18.0), redMat);
-  redBand.position.set(0, 1.4, 0);
+  const redBand = new THREE.Mesh(new THREE.BoxGeometry(3.22, 0.78, 17.8), redMat);
+  redBand.position.set(0, 1.36, 0);
   loco.add(redBand);
 
   // 3. Golden Yellow Mid Body
-  const yellowBand = new THREE.Mesh(new THREE.BoxGeometry(3.22, 1.15, 17.8), yellowMat);
-  yellowBand.position.set(0, 2.38, 0);
+  const yellowBand = new THREE.Mesh(new THREE.BoxGeometry(3.22, 1.08, 17.8), yellowMat);
+  yellowBand.position.set(0, 2.30, 0);
   loco.add(yellowBand);
 
   // 4. Royal Blue Upper Cab & Hood
-  const blueUpper = new THREE.Mesh(new THREE.BoxGeometry(3.16, 1.05, 17.6), blueMat);
-  blueUpper.position.set(0, 3.42, 0);
+  const blueUpper = new THREE.Mesh(new THREE.BoxGeometry(3.18, 0.98, 17.6), blueMat);
+  blueUpper.position.set(0, 3.34, 0);
   loco.add(blueUpper);
 
   // 5. White Roof Cap
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(2.96, 0.32, 17.2), roofMat);
-  roof.position.set(0, 4.08, 0);
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(2.96, 0.30, 17.2), roofMat);
+  roof.position.set(0, 4.00, 0);
   loco.add(roof);
 
   // 6. 4 Roof Exhaust / Radiator Vents (matching screenshot)
   const ventGeo = new THREE.BoxGeometry(1.75, 0.18, 1.15);
   [-4.6, -1.6, 1.4, 4.4].forEach((zPos) => {
     const vent = new THREE.Mesh(ventGeo, ventMat);
-    vent.position.set(0, 4.28, zPos);
+    vent.position.set(0, 4.25, zPos);
     loco.add(vent);
   });
 
   // 7. Front Cab Windshield & Twin Headlights (-Z nose)
-  const windshield = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.72, 0.15), chassisMat);
-  windshield.position.set(0, 3.4, -8.82);
+  const windshield = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.70, 0.14), chassisMat);
+  windshield.position.set(0, 3.34, -8.88);
   loco.add(windshield);
 
   [-0.85, 0.85].forEach((xOff) => {
-    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.32, 0.16), lightMat);
-    lamp.position.set(xOff, 2.15, -8.92);
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.30, 0.14), lightMat);
+    lamp.position.set(xOff, 2.15, -8.98);
     loco.add(lamp);
   });
+
+  // 8. Rear Coupler Connector (+Z tail)
+  const rearCoupler = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.6, 0.9), chassisMat);
+  rearCoupler.position.set(0, 1.9, 9.2);
+  loco.add(rearCoupler);
 
   return loco;
 }
@@ -105,40 +113,45 @@ function createBangladeshCoach(): THREE.Group {
   const windowMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.2, metalness: 0.45 });
 
   // 1. Underframe & Bogies
-  const chassis = new THREE.Mesh(new THREE.BoxGeometry(3.12, 0.85, 20.4), chassisMat);
-  chassis.position.set(0, 0.5, 0);
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(3.06, 0.78, 20.0), chassisMat);
+  chassis.position.set(0, 0.50, 0);
   coach.add(chassis);
 
   // 2. Red Lower Belt Stripe
-  const redBelt = new THREE.Mesh(new THREE.BoxGeometry(3.18, 0.55, 20.2), redStripeMat);
-  redBelt.position.set(0, 1.18, 0);
+  const redBelt = new THREE.Mesh(new THREE.BoxGeometry(3.18, 0.54, 19.8), redStripeMat);
+  redBelt.position.set(0, 1.17, 0);
   coach.add(redBelt);
 
   // 3. Bottle Green Main Coach Body
-  const body = new THREE.Mesh(new THREE.BoxGeometry(3.16, 2.1, 20.2), greenMat);
-  body.position.set(0, 2.48, 0);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(3.16, 2.08, 19.8), greenMat);
+  body.position.set(0, 2.49, 0);
   coach.add(body);
 
   // 4. White Roof Canopy
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(2.94, 0.34, 19.9), roofMat);
-  roof.position.set(0, 3.68, 0);
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(2.94, 0.32, 19.5), roofMat);
+  roof.position.set(0, 3.70, 0);
   coach.add(roof);
 
   // 5. Recessed Side Windows along both flanks
-  const winGeo = new THREE.BoxGeometry(3.22, 0.68, 1.35);
+  const winGeo = new THREE.BoxGeometry(3.24, 0.66, 1.32);
   for (let i = -3; i <= 3; i++) {
     const win = new THREE.Mesh(winGeo, windowMat);
-    win.position.set(0, 2.68, i * 2.45);
+    win.position.set(0, 2.66, i * 2.42);
     coach.add(win);
   }
 
   // 6. Roof AC Units
-  const acGeo = new THREE.BoxGeometry(1.4, 0.22, 2.2);
-  [-5.2, 5.2].forEach((zOff) => {
+  const acGeo = new THREE.BoxGeometry(1.4, 0.22, 2.15);
+  [-5.1, 5.1].forEach((zOff) => {
     const ac = new THREE.Mesh(acGeo, chassisMat);
-    ac.position.set(0, 3.9, zOff);
+    ac.position.set(0, 3.98, zOff);
     coach.add(ac);
   });
+
+  // 7. Vestibule Gangway Connector
+  const gangway = new THREE.Mesh(new THREE.BoxGeometry(1.55, 2.35, 0.9), chassisMat);
+  gangway.position.set(0, 2.15, 10.2);
+  coach.add(gangway);
 
   return coach;
 }
@@ -209,7 +222,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
     followLockRef.current = true;
     map.easeTo({
       center: telemetry.coords,
-      zoom: 15.6,
+      zoom: DEFAULT_TRAIN_ZOOM,
       pitch: is3D ? 58 : 0,
       bearing: 28,
       duration: 900,
@@ -272,7 +285,9 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
       map = new MapLibreMap({
         container,
         center: initialTelemetry.coords,
-        zoom: 15.6,
+        zoom: DEFAULT_TRAIN_ZOOM,
+        minZoom: 5,
+        maxZoom: 19,
         pitch: 58,
         bearing: 28,
         maxPitch: 72,
@@ -348,7 +363,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': '#5c8c2a',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 5, 14, 18, 17, 42],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 5, 14, 18, 17, 46, 19, 86],
           'line-opacity': 0.92,
         },
       });
@@ -361,7 +376,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': '#3f4652',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2.5, 14, 9, 17, 22],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2.5, 14, 9, 17, 24, 19, 44],
         },
       });
 
@@ -372,7 +387,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
         source: 'railway-track',
         paint: {
           'line-color': '#1e242c',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 8, 17, 19],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 8, 17, 20, 19, 38],
           'line-dasharray': [0.35, 0.65],
         },
       });
@@ -384,7 +399,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
         source: 'railway-track',
         paint: {
           'line-color': '#cbd5e1',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1, 14, 2.2, 17, 4.5],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1, 14, 2.2, 17, 4.5, 19, 8],
           'line-opacity': 0.85,
         },
       });
@@ -466,35 +481,48 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
           if (!renderer || !scene || !camera) return;
 
           const activePoly = polylineRef.current;
-          const activeTrain = trainRef.current;
           const activeLive = liveRef.current;
           const zoom = map.getZoom();
 
-          // Keep train readable at both close-up (zoom 16) and mid-range (zoom 12)
-          const visualScale = Math.max(2.1, Math.min(28, Math.pow(2, 15.8 - zoom) * 2.2));
-          const totalKm = Math.max(10, activeTrain.stops[activeTrain.stops.length - 1]?.kmFromStart || 300);
+          // Smooth visual scaling across zoom 10..19 so close-up zooming adds detail without blowing up or breaking
+          const visualScale = Math.max(
+            1.25,
+            Math.min(26, Math.pow(2, (DEFAULT_TRAIN_ZOOM - zoom) * 0.78) * 2.55)
+          );
 
-          // Sample head locomotive + articulated trailing coaches along curved track
+          // Sample head locomotive + articulated trailing coaches along exact polyline arc length
           const headSample = samplePointAlongRoute(activePoly, activeLive.progress01);
+          const polyTotalKm = Math.max(1, headSample.totalKm);
           const headMerc = MercatorCoordinate.fromLngLat(headSample.coords, 0);
           const meterUnits = headMerc.meterInMercatorCoordinateUnits();
           const finalScale = meterUnits * visualScale;
 
-          locoMesh.position.set(headMerc.x, headMerc.y, 0);
-          locoMesh.scale.set(finalScale, finalScale, finalScale);
+          // Compute local-origin transform in Float64 so GPU Float32 vertex shaders never lose precision at high zoom
+          const mainMatrix = new THREE.Matrix4().fromArray(options.defaultProjectionData.mainMatrix);
+          const localFrame = new THREE.Matrix4()
+            .makeTranslation(headMerc.x, headMerc.y, 0)
+            .scale(new THREE.Vector3(finalScale, finalScale, finalScale));
+          camera.projectionMatrix.copy(mainMatrix).multiply(localFrame);
+
+          locoMesh.position.set(0, 0, 0);
+          locoMesh.scale.set(1, 1, 1);
           locoMesh.rotation.set(Math.PI / 2, 0, headSample.bearingRad - Math.PI, 'ZYX');
 
-          const coachSpacingKm = (21.5 * visualScale) / 1000;
           let tailCoords: [number, number] = headSample.coords;
 
           for (let i = 0; i < coaches.length; i++) {
-            const offsetProgress = activeLive.progress01 - ((i + 1) * coachSpacingKm) / totalKm;
-            const coachSample = samplePointAlongRoute(activePoly, Math.max(0.001, offsetProgress));
+            // Exact coupled spacing in meters: locoHalf(9.0) + coachHalf(10.0) + gap(0.8) + i * (coachLen(20.0) + gap(0.8))
+            const distMeters = (19.8 + i * 20.8) * visualScale;
+            const offsetProgress = activeLive.progress01 - distMeters / 1000 / polyTotalKm;
+            const coachSample = samplePointAlongTrackExact(activePoly, offsetProgress);
             const merc = MercatorCoordinate.fromLngLat(coachSample.coords, 0);
-            const cScale = merc.meterInMercatorCoordinateUnits() * visualScale;
 
-            coaches[i].position.set(merc.x, merc.y, 0);
-            coaches[i].scale.set(cScale, cScale, cScale);
+            coaches[i].position.set(
+              (merc.x - headMerc.x) / finalScale,
+              (merc.y - headMerc.y) / finalScale,
+              0
+            );
+            coaches[i].scale.set(1, 1, 1);
             coaches[i].rotation.set(Math.PI / 2, 0, coachSample.bearingRad - Math.PI, 'ZYX');
 
             if (i === coaches.length - 1) {
@@ -517,8 +545,8 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
             }
           }
 
-          camera.projectionMatrix.fromArray(options.defaultProjectionData.mainMatrix);
           renderer.resetState();
+          renderer.clearDepth();
           renderer.render(scene, camera);
         },
 
@@ -544,7 +572,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
     const telemetry = computeTrainTelemetry(train, liveState, poly);
     map.flyTo({
       center: telemetry.coords,
-      zoom: 15.6,
+      zoom: DEFAULT_TRAIN_ZOOM,
       pitch: is3D ? 58 : 0,
       bearing: 28,
       duration: 850,

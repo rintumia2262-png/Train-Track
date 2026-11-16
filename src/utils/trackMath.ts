@@ -36,7 +36,7 @@ export function buildTrackPolyline(train: TrainDefinition): [number, number][] {
   if (stopCoords.length < 2) return stopCoords;
 
   const polyline: [number, number][] = [];
-  const subSteps = 10;
+  const subSteps = 18;
 
   for (let i = 0; i < stopCoords.length - 1; i++) {
     const p0 = stopCoords[i];
@@ -122,6 +122,36 @@ export function samplePointAlongRoute(polyline: [number, number][], progress01: 
     coords: last,
     bearingRad: computeBearingRad(prev, last),
     totalKm,
+  };
+}
+
+/**
+ * Samples along the polyline using exact arc-length and smoothly extrapolates backward
+ * if progress01 < 0 so trailing coaches never collapse onto the starting point.
+ */
+export function samplePointAlongTrackExact(
+  polyline: [number, number][],
+  progress01: number
+): TrackSample {
+  if (polyline.length < 2) {
+    return samplePointAlongRoute(polyline, progress01);
+  }
+  if (progress01 >= 0 && progress01 <= 1) {
+    return samplePointAlongRoute(polyline, progress01);
+  }
+
+  const base = samplePointAlongRoute(polyline, progress01 < 0 ? 0 : 1);
+  const a = progress01 < 0 ? polyline[0] : polyline[polyline.length - 2];
+  const b = progress01 < 0 ? polyline[1] : polyline[polyline.length - 1];
+  const segKm = Math.max(0.001, haversineKm(a, b));
+  const extraKm = (progress01 < 0 ? progress01 : progress01 - 1) * base.totalKm;
+  const ratio = extraKm / segKm;
+  const anchor = progress01 < 0 ? a : b;
+
+  return {
+    coords: [anchor[0] + (b[0] - a[0]) * ratio, anchor[1] + (b[1] - a[1]) * ratio],
+    bearingRad: computeBearingRad(a, b),
+    totalKm: base.totalKm,
   };
 }
 
