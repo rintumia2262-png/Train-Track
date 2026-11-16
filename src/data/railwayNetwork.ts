@@ -38,6 +38,8 @@ export interface TrainDefinition {
   initialLastPingSecAgo: number;
 }
 
+export type TrainMotionPhase = 'cruising' | 'braking' | 'stopped' | 'accelerating';
+
 export interface LiveTrainState {
   id: string;
   progress01: number; // 0..1 along stops polyline
@@ -47,6 +49,7 @@ export interface LiveTrainState {
   activeReporters: number;
   lastReporterLabelBn: string;
   lastReporterLabelEn: string;
+  motionPhase?: TrainMotionPhase;
   statusNoteBn?: string;
   statusNoteEn?: string;
 }

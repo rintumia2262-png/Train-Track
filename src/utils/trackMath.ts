@@ -207,6 +207,7 @@ export interface ComputedTelemetry {
   prevStopNameEn: string;
   currentAreaNameBn: string;
   currentAreaNameEn: string;
+  nextStopId: string;
   nextStopNameBn: string;
   nextStopNameEn: string;
   distFromPrevKm: number;
@@ -251,6 +252,7 @@ export function computeTrainTelemetry(
     prevStopNameEn: prevStation?.nameEn ?? '',
     currentAreaNameBn: distFromPrevKm < distToNextKm ? prevStation?.nameBn ?? '' : nextStation?.nameBn ?? '',
     currentAreaNameEn: distFromPrevKm < distToNextKm ? prevStation?.nameEn ?? '' : nextStation?.nameEn ?? '',
+    nextStopId: nextStop.stationId,
     nextStopNameBn: nextStation?.nameBn ?? '',
     nextStopNameEn: nextStation?.nameEn ?? '',
     distFromPrevKm: Number(distFromPrevKm.toFixed(1)),

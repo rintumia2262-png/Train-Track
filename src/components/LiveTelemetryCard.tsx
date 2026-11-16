@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Bell,
+  BellRing,
   Clock,
   Info,
   MessageSquare,
@@ -22,6 +24,10 @@ interface LiveTelemetryCardProps {
   lang: 'bn' | 'en';
   messages: ChatMessage[];
   onSendMessage: (author: string, coach: string, text: string) => Promise<void>;
+  userDisplayName?: string | null;
+  onSignIn?: () => Promise<void>;
+  pushSubscribed?: boolean;
+  onOpenPushAlerts?: () => void;
 }
 
 export const LiveTelemetryCard: React.FC<LiveTelemetryCardProps> = ({
@@ -31,6 +37,10 @@ export const LiveTelemetryCard: React.FC<LiveTelemetryCardProps> = ({
   lang,
   messages,
   onSendMessage,
+  userDisplayName,
+  onSignIn,
+  pushSubscribed,
+  onOpenPushAlerts,
 }) => {
   const [drawer, setDrawer] = useState<'none' | 'details' | 'chat'>('none');
   const [chatText, setChatText] = useState('');
@@ -109,6 +119,12 @@ export const LiveTelemetryCard: React.FC<LiveTelemetryCardProps> = ({
                 {lang === 'bn' ? 'লাইভ' : 'Live'} · {timeAgoLabel}
               </span>
             </div>
+
+            {(liveState.statusNoteBn || liveState.statusNoteEn) && (
+              <div className="mt-1 text-[11px] font-medium text-slate-600">
+                {lang === 'bn' ? liveState.statusNoteBn : liveState.statusNoteEn}
+              </div>
+            )}
           </div>
 
           {/* Speedometer Box matching screenshot */}
@@ -161,26 +177,43 @@ export const LiveTelemetryCard: React.FC<LiveTelemetryCardProps> = ({
           </div>
         </div>
 
-        {/* Bottom 2 Action Buttons: বিস্তারিত & চ্যাট */}
-        <div className="mt-4 grid grid-cols-2 gap-3">
+        {/* Bottom Action Buttons: বিস্তারিত, চ্যাট, ও পুশ অ্যালার্ট */}
+        <div className="mt-4 grid grid-cols-3 gap-2">
           <button
             type="button"
             onClick={() => setDrawer('details')}
-            className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors cursor-pointer"
+            className="flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors cursor-pointer"
           >
-            <Info className="h-4 w-4 text-rose-700" />
+            <Info className="h-4 w-4 text-rose-700 shrink-0" />
             <span>{lang === 'bn' ? 'বিস্তারিত' : 'Details'}</span>
           </button>
 
           <button
             type="button"
             onClick={() => setDrawer('chat')}
-            className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors cursor-pointer"
+            className="flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors cursor-pointer"
           >
-            <MessageSquare className="h-4 w-4 text-rose-700" />
+            <MessageSquare className="h-4 w-4 text-rose-700 shrink-0" />
             <span>
               {lang === 'bn' ? 'চ্যাট' : 'Chat'} ({fmtNum(messages.length)})
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenPushAlerts?.()}
+            className={`flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border px-2.5 py-2.5 text-xs sm:text-sm font-semibold transition-colors cursor-pointer ${
+              pushSubscribed
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                : 'border-slate-200 bg-slate-50 text-slate-800 hover:bg-slate-100'
+            }`}
+          >
+            {pushSubscribed ? (
+              <BellRing className="h-4 w-4 text-emerald-700 shrink-0" />
+            ) : (
+              <Bell className="h-4 w-4 text-rose-700 shrink-0" />
+            )}
+            <span>{lang === 'bn' ? 'অ্যালার্ট' : 'Alerts'}</span>
           </button>
         </div>
       </div>
@@ -360,13 +393,30 @@ export const LiveTelemetryCard: React.FC<LiveTelemetryCardProps> = ({
             </div>
 
             <form onSubmit={handleChatSubmit} className="border-t border-slate-100 p-3.5 space-y-2">
+              {!userDisplayName && onSignIn && (
+                <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-900">
+                  <span>
+                    {lang === 'bn'
+                      ? 'ক্লাউডে স্থায়ী চ্যাটের জন্য Google লগইন করুন'
+                      : 'Sign in with Google for Firebase cloud sync'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void onSignIn()}
+                    className="rounded-lg bg-amber-600 px-2.5 py-1 font-semibold text-white hover:bg-amber-500 cursor-pointer whitespace-nowrap"
+                  >
+                    {lang === 'bn' ? 'লগইন' : 'Sign in'}
+                  </button>
+                </div>
+              )}
               <div className="flex gap-2">
                 <input
                   type="text"
-                  value={chatAuthor}
+                  value={userDisplayName || chatAuthor}
                   onChange={(e) => setChatAuthor(e.target.value)}
+                  disabled={Boolean(userDisplayName)}
                   placeholder={lang === 'bn' ? 'আপনার নাম' : 'Your name'}
-                  className="w-1/2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-emerald-600 focus:outline-none"
+                  className="w-1/2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-emerald-600 focus:outline-none disabled:bg-slate-100"
                 />
                 <select
                   value={chatCoach}

@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
+  Bell,
+  BellRing,
   Building2,
+  LogIn,
+  LogOut,
   Map as MapIcon,
   Radio,
   Search,
   TrainFront,
 } from 'lucide-react';
 import { LiveTelemetryCard } from './components/LiveTelemetryCard';
+import { PushAlertModal } from './components/PushAlertModal';
 import {
   InsideTrainAndShopView,
   StationBoardView,
@@ -19,8 +25,23 @@ import {
   LiveTrainState,
   TRAINS,
 } from './data/railwayNetwork';
+import {
+  auth,
+  loadPushAlertPreference,
+  publishTrainChatMessage,
+  publishTrainLocationPing,
+  savePushAlertPreference,
+  signInWithGoogle,
+  signOutFirebase,
+  subscribeToPublicTrains,
+  subscribeToTrainMessages,
+  syncPrivateUserProfile,
+  type PushAlertPreferenceData,
+} from './firebase.tsx';
 import { OfflineIndicator, PWAInstallButton } from './pwa/PWAComponents';
+import { PushSubscribeOptions, usePushNotifications } from './pwa/usePushNotifications';
 import { buildTrackPolyline, computeTrainTelemetry, toBnDigits } from './utils/trackMath';
+import { stepRealisticTrainPhysics, TrainPhysicsMemory } from './utils/trainPhysics';
 import { TrainAudioEngine } from './utils/trainAudio';
 
 type ActiveTab = 'map' | 'search' | 'stations' | 'share';
@@ -68,14 +89,42 @@ export default function App() {
     return grouped;
   });
   const [soundEnabled, setSoundEnabled] = useState(false);
+  const [fbUser, setFbUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [pushModalOpen, setPushModalOpen] = useState(false);
+  const [savedPushPref, setSavedPushPref] = useState<PushAlertPreferenceData | null>(null);
 
+  const push = usePushNotifications(lang);
   const audioRef = useRef<TrainAudioEngine | null>(null);
+  const offlinePhysicsRef = useRef<Record<string, TrainPhysicsMemory>>({});
 
   useEffect(() => {
     audioRef.current = new TrainAudioEngine();
     return () => {
       audioRef.current?.dispose();
     };
+  }, []);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setFbUser(user);
+      setAuthReady(true);
+      if (user && user.emailVerified) {
+        void syncPrivateUserProfile(user).catch(() => {
+          // Handled inside firebase.tsx ErrorBoundary / console logger
+        });
+        void loadPushAlertPreference(user)
+          .then((pref) => {
+            if (pref) setSavedPushPref(pref);
+          })
+          .catch(() => {
+            // Non-blocking if push preference hasn't been created yet
+          });
+      } else {
+        setSavedPushPref(null);
+      }
+    });
+    return () => unsub();
   }, []);
 
   // Connect to Express backend + SSE real-time stream (gracefully falls back to local ticks if offline)
@@ -122,23 +171,32 @@ export default function App() {
         });
       });
     } catch {
-      // Fallback offline tick if SSE unavailable
+      // Fallback offline realistic physics tick if SSE unavailable
       fallbackTimer = window.setInterval(() => {
+        const now = Date.now();
         setTrainsState((prev) => {
           const next = { ...prev };
           for (const t of TRAINS) {
             const cur = next[t.id];
             if (!cur) continue;
-            const totalKm = t.stops[t.stops.length - 1]?.kmFromStart || 300;
-            const step = cur.speedKmh / 3600 / totalKm;
-            next[t.id] = {
-              ...cur,
-              progress01: cur.progress01 + step > 0.98 ? 0.05 : cur.progress01 + step,
-            };
+            if (!offlinePhysicsRef.current[t.id]) {
+              offlinePhysicsRef.current[t.id] = {
+                dwellUntilMs: 0,
+                lastDwelledStopIdx: -1,
+                exactSpeedKmh: cur.speedKmh,
+              };
+            }
+            next[t.id] = stepRealisticTrainPhysics(
+              t,
+              cur,
+              offlinePhysicsRef.current[t.id],
+              1.0,
+              now
+            );
           }
           return next;
         });
-      }, 2500);
+      }, 1000);
     }
 
     return () => {
@@ -147,7 +205,26 @@ export default function App() {
     };
   }, []);
 
-  // Load chat history when switching active train
+  // Subscribe to Firestore real-time train states once Firebase auth initializes
+  useEffect(() => {
+    if (!authReady) return;
+    const unsubTrains = subscribeToPublicTrains((updates) => {
+      setTrainsState((prev) => {
+        const next = { ...prev };
+        for (const u of updates) {
+          if (!u.id || !next[u.id]) continue;
+          // Prefer whichever ping is fresher so server physics & passenger pings coexist cleanly
+          if ((u.lastUpdatedAt ?? 0) >= next[u.id].lastUpdatedAt - 1500) {
+            next[u.id] = { ...next[u.id], ...u };
+          }
+        }
+        return next;
+      });
+    });
+    return () => unsubTrains();
+  }, [authReady]);
+
+  // Load chat history from Express + Firestore real-time subscription when switching active train
   useEffect(() => {
     fetch(`/api/trains/${selectedTrainId}/chat`)
       .then((res) => (res.ok ? res.json() : null))
@@ -159,7 +236,25 @@ export default function App() {
       .catch(() => {
         // Ignore offline
       });
-  }, [selectedTrainId]);
+
+    if (!authReady) return;
+    const unsubMsgs = subscribeToTrainMessages(selectedTrainId, (fsMsgs) => {
+      if (fsMsgs.length === 0) return;
+      setChatMap((prev) => {
+        const existing = prev[selectedTrainId] ?? [];
+        const merged = [...existing];
+        for (const m of fsMsgs) {
+          if (!merged.some((e) => e.id === m.id || (e.text === m.text && e.author === m.author))) {
+            merged.push(m);
+          }
+        }
+        merged.sort((a, b) => a.createdAt - b.createdAt);
+        return { ...prev, [selectedTrainId]: merged.slice(-60) };
+      });
+    });
+
+    return () => unsubMsgs();
+  }, [selectedTrainId, authReady]);
 
   const selectedTrain = useMemo(
     () => TRAINS.find((t) => t.id === selectedTrainId) ?? TRAINS[0],
@@ -184,6 +279,12 @@ export default function App() {
     [selectedTrain, selectedLiveState, selectedPolyline]
   );
 
+  useEffect(() => {
+    if (soundEnabled) {
+      audioRef.current?.setEnabled(true, selectedLiveState.speedKmh);
+    }
+  }, [soundEnabled, selectedLiveState.speedKmh]);
+
   const handleToggleSound = useCallback(() => {
     setSoundEnabled((prev) => {
       const next = !prev;
@@ -192,13 +293,84 @@ export default function App() {
     });
   }, [selectedLiveState.speedKmh]);
 
+  const handleGoogleSignIn = useCallback(async () => {
+    try {
+      await signInWithGoogle();
+    } catch {
+      // User closed popup or popup blocked
+    }
+  }, []);
+
+  const handleGoogleSignOut = useCallback(async () => {
+    try {
+      await signOutFirebase();
+    } catch {
+      // Ignore signout error
+    }
+  }, []);
+
+  const handleEnablePush = useCallback(
+    async (opts: PushSubscribeOptions) => {
+      const endpoint = await push.subscribe(opts);
+      if (endpoint) {
+        const nextPref: PushAlertPreferenceData = {
+          trainId: opts.trainId,
+          stationId: opts.stationId,
+          enabled: true,
+          alertOnArrival: opts.alertOnArrival,
+          alertOnDelay: opts.alertOnDelay,
+          endpoint,
+        };
+        setSavedPushPref(nextPref);
+        if (fbUser && fbUser.emailVerified) {
+          await savePushAlertPreference(fbUser, nextPref).catch(() => {});
+        }
+      }
+    },
+    [push, fbUser]
+  );
+
+  const handleDisablePush = useCallback(
+    async (trainId: string, stationId: string) => {
+      await push.unsubscribe();
+      const nextPref: PushAlertPreferenceData = {
+        trainId,
+        stationId,
+        enabled: false,
+        alertOnArrival: savedPushPref?.alertOnArrival ?? true,
+        alertOnDelay: savedPushPref?.alertOnDelay ?? true,
+      };
+      setSavedPushPref(nextPref);
+      if (fbUser && fbUser.emailVerified) {
+        await savePushAlertPreference(fbUser, nextPref).catch(() => {});
+      }
+    },
+    [push, fbUser, savedPushPref]
+  );
+
+  const handleSendTestPush = useCallback(
+    async (opts: { trainId: string; stationId: string; lang: 'bn' | 'en' }) => {
+      await push.sendTestPush(opts);
+    },
+    [push]
+  );
+
   const handleSendChat = useCallback(
     async (author: string, coach: string, text: string) => {
+      const displayAuthor = fbUser?.displayName || author;
+      if (fbUser && fbUser.emailVerified) {
+        await publishTrainChatMessage(selectedTrain.id, selectedLiveState, {
+          author: displayAuthor,
+          coach,
+          text,
+        });
+      }
+
       try {
         const res = await fetch(`/api/trains/${selectedTrain.id}/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ author, coach, text }),
+          body: JSON.stringify({ author: displayAuthor, coach, text }),
         });
         if (res.ok) {
           const data = (await res.json()) as { message: ChatMessage };
@@ -216,7 +388,7 @@ export default function App() {
       const fallbackMsg: ChatMessage = {
         id: `local-${Date.now()}`,
         trainId: selectedTrain.id,
-        author,
+        author: displayAuthor,
         coach,
         text,
         createdAt: Date.now(),
@@ -226,7 +398,7 @@ export default function App() {
         [selectedTrain.id]: [...(prev[selectedTrain.id] ?? []), fallbackMsg],
       }));
     },
-    [selectedTrain.id]
+    [selectedTrain.id, selectedLiveState, fbUser]
   );
 
   const handlePingTrain = useCallback(
@@ -240,6 +412,17 @@ export default function App() {
         reporterLabelEn?: string;
       }
     ) => {
+      const curState = trainsState[trainId];
+      if (fbUser && fbUser.emailVerified && curState) {
+        await publishTrainLocationPing(trainId, curState, {
+          progress01: payload.progress01 ?? curState.progress01,
+          speedKmh: payload.speedKmh ?? curState.speedKmh,
+          delayMinutes: payload.delayMinutes ?? curState.delayMinutes,
+          labelBn: payload.reporterLabelBn ?? curState.lastReporterLabelBn,
+          labelEn: payload.reporterLabelEn ?? curState.lastReporterLabelEn,
+        });
+      }
+
       try {
         const res = await fetch(`/api/trains/${trainId}/ping`, {
           method: 'POST',
@@ -271,7 +454,7 @@ export default function App() {
         };
       });
     },
-    []
+    [fbUser, trainsState]
   );
 
   const handleSelectTrainOnMap = useCallback((trainId: string) => {
@@ -312,7 +495,50 @@ export default function App() {
           </select>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setPushModalOpen(true)}
+            title={lang === 'bn' ? 'পুশ নোটিফিকেশন অ্যালার্ট' : 'Push Notification Alerts'}
+            aria-label={lang === 'bn' ? 'পুশ নোটিফিকেশন অ্যালার্ট' : 'Push Notification Alerts'}
+            className={`relative flex h-8 w-8 items-center justify-center rounded-lg border transition-colors cursor-pointer ${
+              push.state.isSubscribed
+                ? 'border-emerald-400/50 bg-emerald-700/80 text-white hover:bg-emerald-600'
+                : 'border-white/20 bg-white/10 text-white hover:bg-white/20'
+            }`}
+          >
+            {push.state.isSubscribed ? (
+              <BellRing className="h-4 w-4" />
+            ) : (
+              <Bell className="h-4 w-4" />
+            )}
+            {push.state.isSubscribed && (
+              <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-[#0f3d2e]" />
+            )}
+          </button>
+
+          {fbUser ? (
+            <button
+              type="button"
+              onClick={() => void handleGoogleSignOut()}
+              title={fbUser.email || 'Signed in'}
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-800/70 px-2 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 transition-colors cursor-pointer"
+            >
+              <span className="hidden sm:inline max-w-[90px] truncate">
+                {fbUser.displayName?.split(' ')[0] || 'User'}
+              </span>
+              <LogOut className="h-3.5 w-3.5" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleGoogleSignIn()}
+              className="flex items-center gap-1 rounded-lg border border-white/20 bg-white/10 px-2 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <LogIn className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{lang === 'bn' ? 'লগইন' : 'Sign in'}</span>
+            </button>
+          )}
           <PWAInstallButton lang={lang} />
           <button
             type="button"
@@ -348,6 +574,10 @@ export default function App() {
                 lang={lang}
                 messages={chatMap[selectedTrain.id] ?? []}
                 onSendMessage={handleSendChat}
+                userDisplayName={fbUser?.displayName}
+                onSignIn={handleGoogleSignIn}
+                pushSubscribed={push.state.isSubscribed}
+                onOpenPushAlerts={() => setPushModalOpen(true)}
               />
 
               {/* Desktop Quick Info Summary */}
@@ -467,6 +697,19 @@ export default function App() {
           );
         })}
       </nav>
+
+      <PushAlertModal
+        open={pushModalOpen}
+        onClose={() => setPushModalOpen(false)}
+        selectedTrain={selectedTrain}
+        defaultStationId={telemetry.nextStopId}
+        lang={lang}
+        pushState={push.state}
+        initialPref={savedPushPref}
+        onEnablePush={handleEnablePush}
+        onDisablePush={handleDisablePush}
+        onSendTestPush={handleSendTestPush}
+      />
     </div>
   );
 }

@@ -1,0 +1,283 @@
+{
+  "entities": {
+    "TrainLiveStatus": {
+      "title": "TrainLiveStatus",
+      "description": "Real-time telemetry and location progress of a Bangladesh Railway intercity train.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "progress01": {
+          "type": "number"
+        },
+        "speedKmh": {
+          "type": "number"
+        },
+        "delayMinutes": {
+          "type": "number"
+        },
+        "activeReporters": {
+          "type": "number"
+        },
+        "lastReporterLabelBn": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "lastReporterLabelEn": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "motionPhase": {
+          "type": "string",
+          "enum": ["cruising", "braking", "stopped", "accelerating"]
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "object",
+          "format": "timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "progress01",
+        "speedKmh",
+        "delayMinutes",
+        "activeReporters",
+        "lastReporterLabelBn",
+        "lastReporterLabelEn",
+        "updatedByUid",
+        "isPublic",
+        "updatedAt"
+      ]
+    },
+    "TrainChatMessage": {
+      "title": "TrainChatMessage",
+      "description": "Passenger community live update message scoped to a specific train.",
+      "type": "object",
+      "properties": {
+        "trainId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "coach": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 280
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "object",
+          "format": "timestamp"
+        }
+      },
+      "required": [
+        "trainId",
+        "authorUid",
+        "author",
+        "text",
+        "isPublic",
+        "createdAt"
+      ]
+    },
+    "TrainLocationPing": {
+      "title": "TrainLocationPing",
+      "description": "Crowdsourced onboard GPS or station check-in ping submitted by a verified passenger.",
+      "type": "object",
+      "properties": {
+        "trainId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "reporterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "progress01": {
+          "type": "number"
+        },
+        "speedKmh": {
+          "type": "number"
+        },
+        "delayMinutes": {
+          "type": "number"
+        },
+        "labelBn": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "labelEn": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "object",
+          "format": "timestamp"
+        }
+      },
+      "required": [
+        "trainId",
+        "reporterUid",
+        "progress01",
+        "speedKmh",
+        "delayMinutes",
+        "labelBn",
+        "labelEn",
+        "isPublic",
+        "createdAt"
+      ]
+    },
+    "UserPrivateProfile": {
+      "title": "UserPrivateProfile",
+      "description": "Private user settings and saved favorite trains (PII isolated under private subcollection).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "favoriteTrainIds": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "object",
+          "format": "timestamp"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "favoriteTrainIds",
+        "updatedAt"
+      ]
+    },
+    "PushAlertPreference": {
+      "title": "PushAlertPreference",
+      "description": "Owner-only Web Push station arrival and delay notification subscription settings.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "trainId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "stationId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "alertOnArrival": {
+          "type": "boolean"
+        },
+        "alertOnDelay": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 512
+        },
+        "updatedAt": {
+          "type": "object",
+          "format": "timestamp"
+        }
+      },
+      "required": [
+        "uid",
+        "trainId",
+        "stationId",
+        "enabled",
+        "alertOnArrival",
+        "alertOnDelay",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/trains/{trainId}": {
+      "schema": { "$ref": "#/entities/TrainLiveStatus" },
+      "description": "Live telemetry and position for each intercity train."
+    },
+    "/trains/{trainId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/TrainChatMessage" },
+      "description": "Live passenger community chat messages for a train."
+    },
+    "/trains/{trainId}/pings/{pingId}": {
+      "schema": { "$ref": "#/entities/TrainLocationPing" },
+      "description": "Onboard passenger GPS and station check-in pings for a train."
+    },
+    "/users/{userId}/private/info": {
+      "schema": { "$ref": "#/entities/UserPrivateProfile" },
+      "description": "Owner-only private profile and saved favorite trains."
+    },
+    "/users/{userId}/private/push_alerts": {
+      "schema": { "$ref": "#/entities/PushAlertPreference" },
+      "description": "Owner-only Web Push station arrival and delay alert settings."
+    }
+  }
+}

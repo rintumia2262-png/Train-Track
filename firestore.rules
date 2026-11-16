@@ -1,0 +1,227 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Global Primitives ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // --- Validation Blueprints ---
+    function isValidTrainLiveStatus(data, trainId) {
+      return data.keys().hasAll([
+          'id', 'progress01', 'speedKmh', 'delayMinutes', 'activeReporters',
+          'lastReporterLabelBn', 'lastReporterLabelEn', 'updatedByUid', 'isPublic', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'progress01', 'speedKmh', 'delayMinutes', 'activeReporters',
+          'lastReporterLabelBn', 'lastReporterLabelEn', 'motionPhase',
+          'updatedByUid', 'isPublic', 'updatedAt'
+        ])
+        && data.id is string && data.id == trainId && data.id.size() >= 2 && data.id.size() <= 64
+        && isValidId(data.id)
+        && data.progress01 is number && data.progress01 >= 0 && data.progress01 <= 1
+        && data.speedKmh is number && data.speedKmh >= 0 && data.speedKmh <= 160
+        && data.delayMinutes is number && data.delayMinutes >= 0 && data.delayMinutes <= 720
+        && data.activeReporters is number && data.activeReporters >= 0 && data.activeReporters <= 10000
+        && data.lastReporterLabelBn is string && data.lastReporterLabelBn.size() >= 1 && data.lastReporterLabelBn.size() <= 80
+        && data.lastReporterLabelEn is string && data.lastReporterLabelEn.size() >= 1 && data.lastReporterLabelEn.size() <= 80
+        && (!('motionPhase' in data) || (data.motionPhase is string && data.motionPhase in ['cruising', 'braking', 'stopped', 'accelerating']))
+        && data.updatedByUid is string && data.updatedByUid == request.auth.uid && isValidId(data.updatedByUid)
+        && data.isPublic is bool && data.isPublic == true
+        && data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    function isValidTrainChatMessage(data, trainId) {
+      return data.keys().hasAll(['trainId', 'authorUid', 'author', 'text', 'isPublic', 'createdAt'])
+        && data.keys().hasOnly(['trainId', 'authorUid', 'author', 'coach', 'text', 'isPublic', 'createdAt'])
+        && data.trainId is string && data.trainId == trainId && isValidId(data.trainId)
+        && data.authorUid is string && data.authorUid == request.auth.uid && isValidId(data.authorUid)
+        && data.author is string && data.author.size() >= 1 && data.author.size() <= 40
+        && (!('coach' in data) || (data.coach is string && data.coach.size() >= 1 && data.coach.size() <= 24))
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 280
+        && data.isPublic is bool && data.isPublic == true
+        && data.createdAt is timestamp && data.createdAt == request.time;
+    }
+
+    function isValidTrainLocationPing(data, trainId) {
+      return data.keys().hasAll([
+          'trainId', 'reporterUid', 'progress01', 'speedKmh', 'delayMinutes',
+          'labelBn', 'labelEn', 'isPublic', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'trainId', 'reporterUid', 'progress01', 'speedKmh', 'delayMinutes',
+          'labelBn', 'labelEn', 'isPublic', 'createdAt'
+        ])
+        && data.trainId is string && data.trainId == trainId && isValidId(data.trainId)
+        && data.reporterUid is string && data.reporterUid == request.auth.uid && isValidId(data.reporterUid)
+        && data.progress01 is number && data.progress01 >= 0 && data.progress01 <= 1
+        && data.speedKmh is number && data.speedKmh >= 0 && data.speedKmh <= 160
+        && data.delayMinutes is number && data.delayMinutes >= 0 && data.delayMinutes <= 720
+        && data.labelBn is string && data.labelBn.size() >= 1 && data.labelBn.size() <= 80
+        && data.labelEn is string && data.labelEn.size() >= 1 && data.labelEn.size() <= 80
+        && data.isPublic is bool && data.isPublic == true
+        && data.createdAt is timestamp && data.createdAt == request.time;
+    }
+
+    function isValidUserPrivateProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'favoriteTrainIds', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'favoriteTrainIds', 'updatedAt'])
+        && data.uid is string && data.uid == userId && data.uid == request.auth.uid && isValidId(data.uid)
+        && (!('email' in data) || (data.email is string && data.email.size() >= 3 && data.email.size() <= 160))
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
+        && data.favoriteTrainIds is list && data.favoriteTrainIds.size() <= 20
+        && (data.favoriteTrainIds.size() == 0 || (data.favoriteTrainIds[0] is string && data.favoriteTrainIds[0].size() <= 64))
+        && data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    function isValidPushAlertPreference(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'trainId', 'stationId', 'enabled', 'alertOnArrival', 'alertOnDelay', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'trainId', 'stationId', 'enabled', 'alertOnArrival', 'alertOnDelay', 'endpoint', 'updatedAt'
+        ])
+        && data.uid is string && data.uid == userId && data.uid == request.auth.uid && isValidId(data.uid)
+        && data.trainId is string && data.trainId.size() >= 2 && data.trainId.size() <= 64 && isValidId(data.trainId)
+        && data.stationId is string && data.stationId.size() >= 2 && data.stationId.size() <= 64 && isValidId(data.stationId)
+        && data.enabled is bool
+        && data.alertOnArrival is bool
+        && data.alertOnDelay is bool
+        && (!('endpoint' in data) || (data.endpoint is string && data.endpoint.size() <= 512))
+        && data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    // --- Connection Check Document ---
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+    }
+
+    // --- Public Train Telemetry & Subcollections ---
+    match /trains/{trainId} {
+      allow get: if isValidId(trainId) && existing().isPublic == true;
+      allow list: if existing().isPublic == true;
+
+      allow create: if isVerifiedUser()
+        && isValidId(trainId)
+        && isValidTrainLiveStatus(incoming(), trainId);
+
+      allow update: if isVerifiedUser()
+        && isValidId(trainId)
+        && isValidTrainLiveStatus(incoming(), trainId)
+        && incoming().id == existing().id
+        && incoming().isPublic == existing().isPublic
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'progress01', 'speedKmh', 'delayMinutes', 'activeReporters',
+          'lastReporterLabelBn', 'lastReporterLabelEn', 'motionPhase',
+          'updatedByUid', 'updatedAt'
+        ]);
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow get: if isValidId(trainId) && isValidId(messageId) && existing().isPublic == true;
+        allow list: if existing().isPublic == true;
+
+        // Master Gate: Parent train document must exist (including atomic batch creation)
+        allow create: if isVerifiedUser()
+          && isValidId(trainId)
+          && isValidId(messageId)
+          && isValidTrainChatMessage(incoming(), trainId)
+          && existsAfter(/databases/$(database)/documents/trains/$(trainId));
+
+        allow update: if false;
+
+        allow delete: if isVerifiedUser()
+          && isValidId(trainId)
+          && isValidId(messageId)
+          && existing().authorUid == request.auth.uid;
+      }
+
+      match /pings/{pingId} {
+        allow get: if isValidId(trainId) && isValidId(pingId) && existing().isPublic == true;
+        allow list: if existing().isPublic == true;
+
+        // Master Gate + Atomicity Guarantee: parent train doc updated in same batch
+        allow create: if isVerifiedUser()
+          && isValidId(trainId)
+          && isValidId(pingId)
+          && isValidTrainLocationPing(incoming(), trainId)
+          && existsAfter(/databases/$(database)/documents/trains/$(trainId))
+          && getAfter(/databases/$(database)/documents/trains/$(trainId)).data.updatedByUid == request.auth.uid;
+
+        allow update, delete: if false;
+      }
+    }
+
+    // --- PII-Isolated Private User Profiles & Push Preferences ---
+    match /users/{userId}/private/{docId} {
+      allow list: if false;
+    }
+
+    match /users/{userId}/private/info {
+      allow get: if isVerifiedUser() && isOwner(userId) && isValidId(userId);
+
+      allow create: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidUserPrivateProfile(incoming(), userId);
+
+      allow update: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidUserPrivateProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'email', 'displayName', 'favoriteTrainIds', 'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedUser() && isOwner(userId) && isValidId(userId);
+    }
+
+    match /users/{userId}/private/push_alerts {
+      allow get: if isVerifiedUser() && isOwner(userId) && isValidId(userId);
+
+      allow create: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidPushAlertPreference(incoming(), userId);
+
+      allow update: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidPushAlertPreference(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'trainId', 'stationId', 'enabled', 'alertOnArrival', 'alertOnDelay', 'endpoint', 'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedUser() && isOwner(userId) && isValidId(userId);
+    }
+  }
+}

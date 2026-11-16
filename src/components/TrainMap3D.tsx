@@ -6,11 +6,10 @@ import {
   MercatorCoordinate,
   setWorkerUrl,
 } from 'maplibre-gl';
-import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import * as THREE from 'three';
 import { Layers, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 
-setWorkerUrl(maplibreWorkerUrl);
+setWorkerUrl('/api/maplibre-worker.mjs');
 import { LiveTrainState, STATIONS, TrainDefinition } from '../data/railwayNetwork';
 import {
   buildTrackPolyline,
@@ -176,11 +175,21 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
   const liveRef = useRef(liveState);
   const polylineRef = useRef<[number, number][]>(buildTrackPolyline(train));
   const followLockRef = useRef(true);
+  const userInteractingRef = useRef(false);
+  const visualProgressRef = useRef(liveState.progress01);
+  const prevTrainIdRef = useRef(train.id);
 
   useEffect(() => {
     trainRef.current = train;
     polylineRef.current = buildTrackPolyline(train);
     liveRef.current = liveState;
+    if (
+      prevTrainIdRef.current !== train.id ||
+      Math.abs(liveState.progress01 - visualProgressRef.current) > 0.005
+    ) {
+      visualProgressRef.current = liveState.progress01;
+      prevTrainIdRef.current = train.id;
+    }
   }, [train, liveState]);
 
   // Update GeoJSON sources when selected train changes
@@ -229,23 +238,42 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
     });
   }, [train.id, lang]);
 
-  // Trigger map repaint whenever live train state ticks
+  // Smooth 60fps visual roll interpolation between 1s server/Firestore updates
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
+    let rafId = 0;
+    let lastTime = performance.now();
 
-    const poly = polylineRef.current;
-    const telemetry = computeTrainTelemetry(train, liveState, poly);
+    const stepFrame = (now: number) => {
+      const dtSec = Math.min(0.1, Math.max(0, (now - lastTime) / 1000));
+      lastTime = now;
 
-    if (followLockRef.current) {
-      map.easeTo({
-        center: telemetry.coords,
-        duration: 600,
-        easing: (t) => t,
-      });
-    }
-    map.triggerRepaint();
-  }, [liveState.progress01, train]);
+      const map = mapRef.current;
+      const curTrain = trainRef.current;
+      const curLive = liveRef.current;
+      const totalKm = Math.max(10, curTrain.stops[curTrain.stops.length - 1]?.kmFromStart || 300);
+
+      const deltaFromSpeed = ((curLive.speedKmh / 3600) * dtSec) / totalKm;
+      const syncErr = curLive.progress01 - visualProgressRef.current;
+      const nextVisual =
+        visualProgressRef.current + deltaFromSpeed + syncErr * Math.min(1, dtSec * 3.5);
+
+      const moved = Math.abs(nextVisual - visualProgressRef.current) > 1e-8 || curLive.speedKmh > 0;
+      visualProgressRef.current = Math.max(0, Math.min(0.99, nextVisual));
+
+      if (map && moved) {
+        if (followLockRef.current && !userInteractingRef.current) {
+          const sample = samplePointAlongRoute(polylineRef.current, visualProgressRef.current);
+          map.setCenter(sample.coords);
+        }
+        map.triggerRepaint();
+      }
+
+      rafId = window.requestAnimationFrame(stepFrame);
+    };
+
+    rafId = window.requestAnimationFrame(stepFrame);
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
 
   // Toggle Satellite vs Street Map layer
   useEffect(() => {
@@ -341,6 +369,13 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
 
     map.on('dragstart', () => {
       followLockRef.current = false;
+      userInteractingRef.current = true;
+    });
+    map.on('zoomstart', () => {
+      userInteractingRef.current = true;
+    });
+    map.on('moveend', () => {
+      userInteractingRef.current = false;
     });
 
     map.on('load', () => {
@@ -481,8 +516,8 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
           if (!renderer || !scene || !camera) return;
 
           const activePoly = polylineRef.current;
-          const activeLive = liveRef.current;
           const zoom = map.getZoom();
+          const renderProgress = visualProgressRef.current;
 
           // Smooth visual scaling across zoom 10..19 so close-up zooming adds detail without blowing up or breaking
           const visualScale = Math.max(
@@ -491,7 +526,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
           );
 
           // Sample head locomotive + articulated trailing coaches along exact polyline arc length
-          const headSample = samplePointAlongRoute(activePoly, activeLive.progress01);
+          const headSample = samplePointAlongRoute(activePoly, renderProgress);
           const polyTotalKm = Math.max(1, headSample.totalKm);
           const headMerc = MercatorCoordinate.fromLngLat(headSample.coords, 0);
           const meterUnits = headMerc.meterInMercatorCoordinateUnits();
@@ -513,7 +548,7 @@ export const TrainMap3D: React.FC<TrainMap3DProps> = ({
           for (let i = 0; i < coaches.length; i++) {
             // Exact coupled spacing in meters: locoHalf(9.0) + coachHalf(10.0) + gap(0.8) + i * (coachLen(20.0) + gap(0.8))
             const distMeters = (19.8 + i * 20.8) * visualScale;
-            const offsetProgress = activeLive.progress01 - distMeters / 1000 / polyTotalKm;
+            const offsetProgress = renderProgress - distMeters / 1000 / polyTotalKm;
             const coachSample = samplePointAlongTrackExact(activePoly, offsetProgress);
             const merc = MercatorCoordinate.fromLngLat(coachSample.coords, 0);
 

@@ -1,16 +1,35 @@
+import 'dotenv/config';
 import express from 'express';
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import * as webpush from 'web-push';
+import type { PushSubscription } from 'web-push';
 import zlib from 'zlib';
 import { createServer as createViteServer } from 'vite';
 import {
   ChatMessage,
   INITIAL_CHAT_MESSAGES,
   LiveTrainState,
+  STATIONS,
   TRAINS,
 } from './src/data/railwayNetwork';
+import { stepRealisticTrainPhysics, TrainPhysicsMemory } from './src/utils/trainPhysics';
+
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY?.trim() || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY?.trim() || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT?.trim() || 'mailto:alerts@bdtraintrack.app';
+let pushConfigured = false;
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  try {
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+    pushConfigured = true;
+  } catch (err) {
+    console.error('Invalid VAPID configuration:', err);
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,8 +39,23 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(__dirname, '.data');
 const STATE_FILE = path.join(DATA_DIR, 'bd_train_state.json');
 
+interface StoredPushSubscription {
+  subscription: PushSubscription;
+  trainId: string;
+  stationId: string;
+  alertOnArrival: boolean;
+  alertOnDelay: boolean;
+  lang: 'bn' | 'en';
+  createdAt: number;
+  lastSentKey?: string;
+  lastSentAt?: number;
+  lastDelaySentAt?: number;
+}
+
 const trainStates = new Map<string, LiveTrainState>();
+const physicsMemory = new Map<string, TrainPhysicsMemory>();
 const chatStore = new Map<string, ChatMessage[]>();
+const pushSubscriptions = new Map<string, StoredPushSubscription>();
 const sseClients = new Set<express.Response>();
 
 function initializeDefaultState(): void {
@@ -36,6 +70,14 @@ function initializeDefaultState(): void {
       activeReporters: 3 + (train.number.charCodeAt(0) % 7),
       lastReporterLabelBn: 'অন-বোর্ড যাত্রী GPS',
       lastReporterLabelEn: 'On-board Passenger GPS',
+      motionPhase: 'accelerating',
+      statusNoteBn: 'ট্রেন চলমান',
+      statusNoteEn: 'Train in motion',
+    });
+    physicsMemory.set(train.id, {
+      dwellUntilMs: 0,
+      lastDwelledStopIdx: -1,
+      exactSpeedKmh: train.initialSpeedKmh,
     });
     chatStore.set(
       train.id,
@@ -47,11 +89,19 @@ function initializeDefaultState(): void {
     if (fs.existsSync(STATE_FILE)) {
       const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) as {
         chats?: Record<string, ChatMessage[]>;
+        pushSubscriptions?: StoredPushSubscription[];
       };
       if (raw.chats) {
         for (const [tid, msgs] of Object.entries(raw.chats)) {
           if (Array.isArray(msgs) && msgs.length > 0) {
             chatStore.set(tid, msgs.slice(-60));
+          }
+        }
+      }
+      if (Array.isArray(raw.pushSubscriptions)) {
+        for (const sub of raw.pushSubscriptions) {
+          if (sub?.subscription?.endpoint && sub?.subscription?.keys?.p256dh && sub?.subscription?.keys?.auth) {
+            pushSubscriptions.set(sub.subscription.endpoint, sub);
           }
         }
       }
@@ -61,16 +111,58 @@ function initializeDefaultState(): void {
   }
 }
 
-function persistChatState(): void {
+function persistAppState(): void {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     const chats: Record<string, ChatMessage[]> = {};
     for (const [k, v] of chatStore.entries()) {
       chats[k] = v.slice(-60);
     }
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ chats }, null, 2));
+    fs.writeFileSync(
+      STATE_FILE,
+      JSON.stringify(
+        {
+          chats,
+          pushSubscriptions: Array.from(pushSubscriptions.values()),
+        },
+        null,
+        2
+      )
+    );
   } catch {
     // Ignore ephemeral filesystem errors
+  }
+}
+
+async function sendWebPushNotification(
+  entry: StoredPushSubscription,
+  payload: {
+    title: string;
+    body: string;
+    tag: string;
+    url?: string;
+    trainId?: string;
+    stationId?: string;
+  }
+): Promise<{ ok: boolean; expired?: boolean }> {
+  if (!pushConfigured) return { ok: false };
+  try {
+    await webpush.sendNotification(entry.subscription, JSON.stringify(payload), {
+      TTL: 120,
+      urgency: 'high',
+    });
+    return { ok: true };
+  } catch (err: unknown) {
+    const statusCode =
+      typeof err === 'object' && err !== null && 'statusCode' in err
+        ? Number((err as { statusCode?: number }).statusCode)
+        : 0;
+    if (statusCode === 404 || statusCode === 410) {
+      pushSubscriptions.delete(entry.subscription.endpoint);
+      persistAppState();
+      return { ok: false, expired: true };
+    }
+    return { ok: false };
   }
 }
 
@@ -87,28 +179,100 @@ function broadcastEvent(event: string, payload: unknown): void {
 
 initializeDefaultState();
 
-// Gentle live train movement simulation along each corridor
+// Realistic Bangladesh Railway kinematics tick (1s resolution)
+let lastPhysicsTickMs = Date.now();
 setInterval(() => {
   const now = Date.now();
+  const dtSec = Math.max(0.2, Math.min(3, (now - lastPhysicsTickMs) / 1000));
+  lastPhysicsTickMs = now;
+
   for (const train of TRAINS) {
     const state = trainStates.get(train.id);
-    if (!state) continue;
+    const mem = physicsMemory.get(train.id);
+    if (!state || !mem) continue;
+    const nextState = stepRealisticTrainPhysics(train, state, mem, dtSec, now);
+    trainStates.set(train.id, nextState);
 
-    const totalKm = train.stops[train.stops.length - 1]?.kmFromStart || 300;
-    const kmPerSec = Math.max(8, state.speedKmh) / 3600;
-    let nextProgress = state.progress01 + kmPerSec / totalKm;
-    if (nextProgress >= 0.98) {
-      nextProgress = 0.05;
+    // Dispatch automatic station arrival / approaching / delay Web Push alerts
+    if (pushConfigured && pushSubscriptions.size > 0) {
+      const totalKm = Math.max(10, train.stops[train.stops.length - 1]?.kmFromStart || 300);
+      const currentKm = nextState.progress01 * totalKm;
+
+      for (const entry of pushSubscriptions.values()) {
+        if (entry.trainId !== train.id) continue;
+        const stop = train.stops.find((s) => s.stationId === entry.stationId);
+        const st = stop ? STATIONS[stop.stationId] : undefined;
+        if (!stop || !st) continue;
+
+        const distAheadKm = stop.kmFromStart - currentKm;
+
+        if (entry.alertOnArrival) {
+          let triggerPhase: 'approach' | 'arrived' | null = null;
+          if (Math.abs(distAheadKm) <= 0.14 && nextState.speedKmh === 0) {
+            triggerPhase = 'arrived';
+          } else if (distAheadKm > 0.15 && distAheadKm <= 2.0) {
+            triggerPhase = 'approach';
+          }
+
+          if (triggerPhase) {
+            const sentKey = `${train.id}:${entry.stationId}:${triggerPhase}`;
+            const recentlySent = entry.lastSentAt && now - entry.lastSentAt < 120_000;
+            if (entry.lastSentKey !== sentKey && !recentlySent) {
+              entry.lastSentKey = sentKey;
+              entry.lastSentAt = now;
+              persistAppState();
+
+              const isBn = entry.lang !== 'en';
+              const title = isBn
+                ? `${train.nameBn} (${train.number}) — ${st.nameBn}`
+                : `${train.nameEn} (${train.number}) — ${st.nameEn}`;
+              const body =
+                triggerPhase === 'arrived'
+                  ? isBn
+                    ? `ট্রেনটি এই মুহূর্তে ${st.nameBn} স্টেশনে পৌঁছেছে।`
+                    : `Train has arrived at ${st.nameEn} station.`
+                  : isBn
+                    ? `ট্রেনটি ${st.nameBn} স্টেশন থেকে মাত্র ${distAheadKm.toFixed(1)} কি.মি. দূরে (গতি ${nextState.speedKmh} কি/ঘ)।`
+                    : `Train is ${distAheadKm.toFixed(1)} km from ${st.nameEn} (${nextState.speedKmh} km/h).`;
+
+              void sendWebPushNotification(entry, {
+                title,
+                body,
+                tag: sentKey,
+                url: '/',
+                trainId: train.id,
+                stationId: entry.stationId,
+              });
+            }
+          }
+        }
+
+        if (entry.alertOnDelay && nextState.delayMinutes >= 20) {
+          const recentlyDelaySent = entry.lastDelaySentAt && now - entry.lastDelaySentAt < 900_000;
+          if (!recentlyDelaySent) {
+            entry.lastDelaySentAt = now;
+            persistAppState();
+            const isBn = entry.lang !== 'en';
+            void sendWebPushNotification(entry, {
+              title: isBn
+                ? `${train.nameBn} বিলম্ব আপডেট`
+                : `${train.nameEn} Delay Update`,
+              body: isBn
+                ? `ট্রেনটি বর্তমানে ${nextState.delayMinutes} মিনিট বিলম্বে চলছে (${st.nameBn} রুট)।`
+                : `Train is currently running ${nextState.delayMinutes}m delayed (${st.nameEn} route).`,
+              tag: `${train.id}:delay`,
+              url: '/',
+              trainId: train.id,
+              stationId: entry.stationId,
+            });
+          }
+        }
+      }
     }
-
-    // Subtle realistic speed fluctuation
-    const jitter = Math.sin(now * 0.0005 + train.number.length) * 1.4;
-    state.progress01 = nextProgress;
-    state.speedKmh = Math.max(12, Math.min(92, Math.round(train.initialSpeedKmh + jitter)));
   }
 
   broadcastEvent('trains', Array.from(trainStates.values()));
-}, 2000);
+}, 1000);
 
 async function startServer() {
   const app = express();
@@ -116,11 +280,154 @@ async function startServer() {
   app.use(express.json());
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'bd-train-track', trains: trainStates.size });
+    res.json({
+      ok: true,
+      service: 'bd-train-track',
+      trains: trainStates.size,
+      pushConfigured,
+      pushSubscribers: pushSubscriptions.size,
+    });
   });
 
   app.get('/api/trains', (_req, res) => {
     res.json({ trains: Array.from(trainStates.values()) });
+  });
+
+  // Serve raw self-contained MapLibre Web Worker without Vite /@vite/client injection
+  app.get('/api/maplibre-worker.mjs', (_req, res) => {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.sendFile(path.resolve(__dirname, 'node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs'));
+  });
+
+  // Web Push VAPID Public Key & Subscription Management
+  app.get('/api/push/public-key', (_req, res) => {
+    res.json({
+      configured: pushConfigured,
+      publicKey: pushConfigured ? VAPID_PUBLIC_KEY : null,
+    });
+  });
+
+  app.post('/api/push/subscribe', (req, res) => {
+    if (!pushConfigured) {
+      res.status(503).json({ error: 'Web Push VAPID keys are not configured on server' });
+      return;
+    }
+
+    const { subscription, trainId, stationId, alertOnArrival, alertOnDelay, lang } = req.body as {
+      subscription?: PushSubscription;
+      trainId?: string;
+      stationId?: string;
+      alertOnArrival?: boolean;
+      alertOnDelay?: boolean;
+      lang?: 'bn' | 'en';
+    };
+
+    if (
+      !subscription ||
+      typeof subscription.endpoint !== 'string' ||
+      !subscription.endpoint.startsWith('https://') ||
+      !subscription.keys?.p256dh ||
+      !subscription.keys?.auth
+    ) {
+      res.status(400).json({ error: 'Valid browser PushSubscription required' });
+      return;
+    }
+
+    const validTrain = TRAINS.find((t) => t.id === trainId) ?? TRAINS[0];
+    const validStop =
+      validTrain.stops.find((s) => s.stationId === stationId) ??
+      validTrain.stops[Math.min(1, validTrain.stops.length - 1)];
+
+    const existing = pushSubscriptions.get(subscription.endpoint);
+    const entry: StoredPushSubscription = {
+      subscription,
+      trainId: validTrain.id,
+      stationId: validStop.stationId,
+      alertOnArrival: alertOnArrival !== false,
+      alertOnDelay: Boolean(alertOnDelay),
+      lang: lang === 'en' ? 'en' : 'bn',
+      createdAt: existing?.createdAt ?? Date.now(),
+      lastSentKey: existing?.lastSentKey,
+      lastSentAt: existing?.lastSentAt,
+    };
+
+    pushSubscriptions.set(subscription.endpoint, entry);
+    persistAppState();
+    res.status(201).json({
+      ok: true,
+      trainId: entry.trainId,
+      stationId: entry.stationId,
+      subscribers: pushSubscriptions.size,
+    });
+  });
+
+  app.post('/api/push/unsubscribe', (req, res) => {
+    const { endpoint } = req.body as { endpoint?: string };
+    if (typeof endpoint === 'string' && endpoint) {
+      pushSubscriptions.delete(endpoint);
+      persistAppState();
+    }
+    res.json({ ok: true, subscribers: pushSubscriptions.size });
+  });
+
+  app.post('/api/push/test', async (req, res) => {
+    if (!pushConfigured) {
+      res.status(503).json({ error: 'Web Push is not configured on server' });
+      return;
+    }
+
+    const { endpoint, trainId, stationId, lang } = req.body as {
+      endpoint?: string;
+      trainId?: string;
+      stationId?: string;
+      lang?: 'bn' | 'en';
+    };
+
+    if (!endpoint || typeof endpoint !== 'string') {
+      res.status(400).json({ error: 'Push subscription endpoint is required' });
+      return;
+    }
+
+    const stored = pushSubscriptions.get(endpoint);
+    if (!stored) {
+      res.status(404).json({ error: 'Subscription not registered on server' });
+      return;
+    }
+
+    const activeTrain = TRAINS.find((t) => t.id === (trainId || stored.trainId)) ?? TRAINS[0];
+    const activeState = trainStates.get(activeTrain.id);
+    const activeSt = STATIONS[stationId || stored.stationId];
+    const isBn = (lang || stored.lang) !== 'en';
+
+    const title = isBn
+      ? `BD Train Track — ${activeTrain.nameBn} (${activeTrain.number})`
+      : `BD Train Track — ${activeTrain.nameEn} (${activeTrain.number})`;
+    const body = isBn
+      ? `পুশ নোটিফিকেশন চালু আছে! গতি: ${activeState?.speedKmh ?? 0} কি/ঘ · পর্যবেক্ষিত স্টেশন: ${activeSt?.nameBn ?? 'নির্বাচিত স্টেশন'}`
+      : `Push alerts active! Speed: ${activeState?.speedKmh ?? 0} km/h · Watching: ${activeSt?.nameEn ?? 'Selected Station'}`;
+
+    const result = await sendWebPushNotification(stored, {
+      title,
+      body,
+      tag: `bd-train-test-${activeTrain.id}`,
+      url: '/',
+      trainId: activeTrain.id,
+      stationId: activeSt?.id || stored.stationId,
+    });
+
+    if (!result.ok) {
+      res.status(result.expired ? 410 : 502).json({
+        ok: false,
+        expired: Boolean(result.expired),
+        error: result.expired
+          ? 'Push subscription expired in browser'
+          : 'Failed to deliver push message to browser push service',
+      });
+      return;
+    }
+
+    res.json({ ok: true });
   });
 
   // Same-origin cached map tile proxy (prevents browser CORS / network block AJAXError)
@@ -299,11 +606,16 @@ async function startServer() {
     if (typeof progress01 === 'number' && !Number.isNaN(progress01)) {
       state.progress01 = Math.max(0.01, Math.min(0.99, progress01));
     }
+    const mem = physicsMemory.get(id);
     if (typeof speedKmh === 'number' && !Number.isNaN(speedKmh)) {
       state.speedKmh = Math.max(0, Math.min(120, Math.round(speedKmh)));
+      if (mem) mem.exactSpeedKmh = state.speedKmh;
     }
     if (typeof delayMinutes === 'number' && !Number.isNaN(delayMinutes)) {
       state.delayMinutes = Math.max(0, Math.min(360, Math.round(delayMinutes)));
+    }
+    if (mem && typeof progress01 === 'number') {
+      mem.dwellUntilMs = 0;
     }
 
     state.lastUpdatedAt = Date.now();
@@ -352,7 +664,7 @@ async function startServer() {
     const existing = chatStore.get(id) ?? [];
     existing.push(message);
     chatStore.set(id, existing.slice(-60));
-    persistChatState();
+    persistAppState();
 
     broadcastEvent('chat', message);
     res.status(201).json({ message });
